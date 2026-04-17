@@ -63,30 +63,33 @@ static bool isResultValueDead(linalg::GenericOp genericOp, OpResult result) {
 llvm::SmallDenseMap<unsigned, unsigned> static deduplicateInputOperands(
     GenericOp genericOp, SmallVector<OpOperand *> &droppedOpOperands,
     SmallVector<Value> &newInputOperands,
-    SmallVector<AffineMap> &newIndexingMaps) {
+    SmallVector<AffineMap> &newIndexingMaps, bool removeInputs) {
   llvm::SmallDenseMap<unsigned, unsigned> origToNewPos;
   llvm::SmallDenseMap<std::pair<Value, AffineMap>, unsigned> dedupedInputs;
   for (const auto &en : llvm::enumerate(genericOp.getDpsInputOperands())) {
     OpOperand *inputOpOperand = en.value();
-    // Check if operand is dead and if dropping the indexing map makes the
-    // loops to shape computation invalid.
-    if (!genericOp.payloadUsesValueFromOperand(inputOpOperand)) {
-      // Add the current operands to the list of potentially droppable
-      // operands. If it cannot be dropped, this needs to be popped back.
-      droppedOpOperands.push_back(inputOpOperand);
-      if (genericOp.canOpOperandsBeDropped(droppedOpOperands))
-        continue;
-      droppedOpOperands.pop_back();
-    }
-
-    // Check if this operand is a duplicate.
     AffineMap indexingMap = genericOp.getMatchingIndexingMap(inputOpOperand);
-    auto it =
-        dedupedInputs.find(std::make_pair(inputOpOperand->get(), indexingMap));
-    if (it != dedupedInputs.end()) {
-      origToNewPos[en.index()] = it->second;
-      droppedOpOperands.push_back(inputOpOperand);
-      continue;
+
+    if (removeInputs) {
+      // Check if operand is dead and if dropping the indexing map makes the
+      // loops to shape computation invalid.
+      if (!genericOp.payloadUsesValueFromOperand(inputOpOperand)) {
+        // Add the current operands to the list of potentially droppable
+        // operands. If it cannot be dropped, this needs to be popped back.
+        droppedOpOperands.push_back(inputOpOperand);
+        if (genericOp.canOpOperandsBeDropped(droppedOpOperands))
+          continue;
+        droppedOpOperands.pop_back();
+      }
+
+      // Check if this operand is a duplicate.
+      auto it = dedupedInputs.find(
+          std::make_pair(inputOpOperand->get(), indexingMap));
+      if (it != dedupedInputs.end()) {
+        origToNewPos[en.index()] = it->second;
+        droppedOpOperands.push_back(inputOpOperand);
+        continue;
+      }
     }
 
     // This is a preserved argument.
@@ -229,7 +232,8 @@ static void populateOpPayload(
 
 FailureOr<linalg::GenericOp>
 mlir::linalg::deduplicateOperandsAndRemoveDeadResults(
-    RewriterBase &rewriter, linalg::GenericOp genericOp, bool removeOutputs) {
+    RewriterBase &rewriter, linalg::GenericOp genericOp, bool removeInputs,
+    bool removeOutputs) {
   // Create a map from argument position in the original op to the argument
   // position in the new op. If the argument is dropped it wont have an entry.
   SmallVector<OpOperand *> droppedOpOperands;
@@ -241,7 +245,7 @@ mlir::linalg::deduplicateOperandsAndRemoveDeadResults(
   // Gather information about duplicate input operands.
   llvm::SmallDenseMap<unsigned, unsigned> origInsToNewInsPos =
       deduplicateInputOperands(genericOp, droppedOpOperands, newInputOperands,
-                               newIndexingMaps);
+                               newIndexingMaps, removeInputs);
 
   // Gather information about the dropped outputs.
   llvm::SmallDenseMap<unsigned, unsigned> origOutsToNewOutsPos =
@@ -294,13 +298,15 @@ namespace {
 struct DeduplicateAndRemoveDeadOperandsAndResults
     : public OpRewritePattern<GenericOp> {
   DeduplicateAndRemoveDeadOperandsAndResults(MLIRContext *ctx,
+                                             bool removeInputs,
                                              bool removeOutputs)
-      : OpRewritePattern<GenericOp>(ctx), removeOutputs(removeOutputs) {}
+      : OpRewritePattern<GenericOp>(ctx), removeInputs(removeInputs),
+        removeOutputs(removeOutputs) {}
 
   LogicalResult matchAndRewrite(GenericOp genericOp,
                                 PatternRewriter &rewriter) const override {
     FailureOr<GenericOp> newOp = deduplicateOperandsAndRemoveDeadResults(
-        rewriter, genericOp, removeOutputs);
+        rewriter, genericOp, removeInputs, removeOutputs);
     if (failed(newOp) || newOp.value() == genericOp) {
       return rewriter.notifyMatchFailure(
           genericOp, "failed to dedup operands/remove dead results");
@@ -309,6 +315,8 @@ struct DeduplicateAndRemoveDeadOperandsAndResults
   }
 
 private:
+  /// If unset, input operands are not deduplicated or removed.
+  bool removeInputs;
   /// If unset, outputs are not modified by this pattern.
   bool removeOutputs;
 };
@@ -431,13 +439,23 @@ struct FoldDuplicateInputBbArgs : public OpRewritePattern<GenericOp> {
 void mlir::linalg::populateEraseUnusedOperandsAndResultsPatterns(
     RewritePatternSet &patterns) {
   patterns.insert<DeduplicateAndRemoveDeadOperandsAndResults>(
-      patterns.getContext(), /*removeOutputs=*/true);
+      patterns.getContext(), /*removeInputs=*/true,
+      /*removeOutputs=*/true);
+  patterns.insert<RemoveUnusedCycleInGenericOp>(patterns.getContext());
+}
+
+void mlir::linalg::populateEraseUnnecessaryOutputsPatterns(
+    RewritePatternSet &patterns) {
+  patterns.insert<DeduplicateAndRemoveDeadOperandsAndResults>(
+      patterns.getContext(), /*removeInputs=*/false,
+      /*removeOutputs=*/true);
   patterns.insert<RemoveUnusedCycleInGenericOp>(patterns.getContext());
 }
 
 void mlir::linalg::populateEraseUnnecessaryInputsPatterns(
     RewritePatternSet &patterns) {
   patterns.insert<DeduplicateAndRemoveDeadOperandsAndResults>(
-      patterns.getContext(), /*removeOutputs=*/false);
+      patterns.getContext(), /*removeInputs=*/true,
+      /*removeOutputs=*/false);
   patterns.insert<FoldDuplicateInputBbArgs>(patterns.getContext());
 }

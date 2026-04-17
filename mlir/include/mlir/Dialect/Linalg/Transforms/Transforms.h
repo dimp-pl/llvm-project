@@ -1634,11 +1634,13 @@ decomposeWinogradOutputTransformOp(RewriterBase &rewriter,
 
 /// Method to deduplicate operands and remove dead results of `linalg.generic`
 /// operations. This is effectively DCE for a linalg.generic op. If there is
-/// deduplication of operands orremoval of results, replaces the `genericOp`
+/// deduplication of operands or removal of results, replaces the `genericOp`
 /// with a new op and returns it. Returns the same operation if there is no
 /// deduplication/removal.
-FailureOr<linalg::GenericOp> deduplicateOperandsAndRemoveDeadResults(
-    RewriterBase &rewriter, linalg::GenericOp genericOp, bool removeOutputs);
+FailureOr<linalg::GenericOp>
+deduplicateOperandsAndRemoveDeadResults(RewriterBase &rewriter,
+                                        linalg::GenericOp genericOp,
+                                        bool removeInputs, bool removeOutputs);
 
 /// Rewrite convolution/pooling/depthwise ops with size-1 window dimensions
 /// into lower-dimensional ops. Uses `inferConvolutionDims` to work with any
@@ -2017,6 +2019,11 @@ void populateExtractSliceSinkingPatterns(
 /// Pattern to remove dead operands and results of `linalg.generic` operations.
 /// This is a pattern wrapper for `deduplicateOperandsAndRemoveDeadResults`.
 void populateEraseUnusedOperandsAndResultsPatterns(RewritePatternSet &patterns);
+
+/// Patterns to remove dead outputs of `linalg.generic` operations without
+/// deduplicating input operands. This is a pattern wrapper for
+/// `deduplicateOperandsAndRemoveDeadResults`
+void populateEraseUnnecessaryOutputsPatterns(RewritePatternSet &patterns);
 
 /// Patterns to promote inputs to outputs and remove unused inputs of
 /// `linalg.generic` ops.

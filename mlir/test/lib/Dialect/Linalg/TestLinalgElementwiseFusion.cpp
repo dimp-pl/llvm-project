@@ -50,6 +50,25 @@ static bool setFusedOpOperandLimit(OpOperand *fusedOperand) {
   return fusedOpOperands.size() <= limit;
 }
 
+static void
+runElementwiseFusionPasses(MLIRContext *context, Region &region,
+                           llvm::function_ref<bool(OpOperand *)> controlFn) {
+  RewritePatternSet cleanupPatterns(context);
+  linalg::populateEraseUnnecessaryOutputsPatterns(cleanupPatterns);
+  (void)applyPatternsGreedily(region, std::move(cleanupPatterns),
+                              GreedyRewriteConfig().setUseTopDownTraversal());
+
+  RewritePatternSet fusionPatterns(context);
+  linalg::populateElementwiseOpsFusionPatterns(fusionPatterns, controlFn);
+  (void)applyPatternsGreedily(region, std::move(fusionPatterns),
+                              GreedyRewriteConfig().setUseTopDownTraversal());
+
+  RewritePatternSet finalCleanupPatterns(context);
+  linalg::populateEraseUnusedOperandsAndResultsPatterns(finalCleanupPatterns);
+  (void)applyPatternsGreedily(region, std::move(finalCleanupPatterns),
+                              GreedyRewriteConfig().setUseTopDownTraversal());
+}
+
 namespace {
 
 /// Pattern to test fusion of producer with consumer, even if producer has
@@ -152,23 +171,14 @@ struct TestLinalgElementwiseFusion
     func::FuncOp funcOp = this->getOperation();
 
     if (fuseGenericOps) {
-      RewritePatternSet fusionPatterns(context);
       auto controlFn = [](OpOperand *operand) { return true; };
-      linalg::populateElementwiseOpsFusionPatterns(fusionPatterns, controlFn);
-      if (failed(applyPatternsGreedily(funcOp.getBody(),
-                                       std::move(fusionPatterns))))
-        return signalPassFailure();
+      runElementwiseFusionPasses(context, funcOp.getBody(), controlFn);
       return;
     }
 
     if (fuseGenericOpsControl) {
-      RewritePatternSet fusionPatterns(context);
-      linalg::populateElementwiseOpsFusionPatterns(fusionPatterns,
-                                                   setFusedOpOperandLimit<4>);
-
-      if (failed(applyPatternsGreedily(funcOp.getBody(),
-                                       std::move(fusionPatterns))))
-        return signalPassFailure();
+      runElementwiseFusionPasses(context, funcOp.getBody(),
+                                 setFusedOpOperandLimit<4>);
       return;
     }
 

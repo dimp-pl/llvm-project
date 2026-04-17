@@ -2457,8 +2457,11 @@ void mlir::linalg::populateElementwiseOpsFusionPatterns(
   patterns.add<FuseElementwiseOps>(context, controlElementwiseOpsFusion);
   patterns.add<FoldFillWithGenericOp, FoldScalarOrSplatConstant,
                RemoveOutsDependency>(context);
-  // Add the patterns that clean up dead operands and results.
-  populateEraseUnusedOperandsAndResultsPatterns(patterns);
+  // NOTE: Input deduplication is NOT included here intentionally.
+  // It reduces producer use counts mid-rewrite, retroactively enabling
+  // FuseElementwiseOps patterns that were initially blocked by
+  // producer->hasOneUse() checks. This can propagate constants through fused
+  // operations, exposing UB (e.g., arith.shrsi with shift >= bitwidth).
 }
 
 void mlir::linalg::populateCollapseDimensions(
@@ -2489,9 +2492,20 @@ struct LinalgElementwiseOpFusionPass
   void runOnOperation() override {
     Operation *op = getOperation();
     MLIRContext *context = op->getContext();
-    RewritePatternSet patterns(context);
 
-    // Add folding with reshape by expansion patterns.
+    // Pre-fusion deduplication: remove dead outputs only (no input
+    // deduplication). This is needed because control functions like
+    // setFusedOpOperandLimit reject producers with multiple results
+    // (getNumResults() != 1), so dead outputs must be cleaned up before fusion.
+    // Input deduplication is NOT done here because it reduces producer use
+    // counts, which would retroactively enable fusion blocked by hasOneUse()
+    // checks.
+    RewritePatternSet cleanupPatterns(context);
+    populateEraseUnnecessaryOutputsPatterns(cleanupPatterns);
+    (void)applyPatternsGreedily(op, std::move(cleanupPatterns),
+                                GreedyRewriteConfig().setUseTopDownTraversal());
+
+    RewritePatternSet patterns(context);
     ControlFusionFn defaultControlFn = [](OpOperand *fusedOperand) {
       Operation *producer = fusedOperand->get().getDefiningOp();
       return producer && producer->hasOneUse();
@@ -2515,6 +2529,12 @@ struct LinalgElementwiseOpFusionPass
 
     // Use TopDownTraversal for compile time reasons.
     (void)applyPatternsGreedily(op, std::move(patterns),
+                                GreedyRewriteConfig().setUseTopDownTraversal());
+
+    // Post-fustion: full cleanup including input deduplication.
+    RewritePatternSet finalCleanupPatterns(context);
+    populateEraseUnusedOperandsAndResultsPatterns(finalCleanupPatterns);
+    (void)applyPatternsGreedily(op, std::move(finalCleanupPatterns),
                                 GreedyRewriteConfig().setUseTopDownTraversal());
   }
 };

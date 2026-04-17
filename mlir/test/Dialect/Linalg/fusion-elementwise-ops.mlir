@@ -1055,3 +1055,40 @@ module {
 // CHECK:         tensor.expand_shape
 // CHECK:         linalg.generic {{.*}}, iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel", "parallel", "reduction"]}
 // CHECK-SAME:     ins(%[[ARG0]], %[[FUSED]]#1 : tensor<1x1x2x1xf32>, tensor<4x1x1x1xf32>)
+
+// -----
+
+// Verify that a producer consumed as duplicate inputs by a consumer is not
+// fused when the producer has multiple uses. Input deduplication must not
+// reduce the producer's use count and retroactively enable fusion that was
+// originally blocked by hasOneUse().
+
+#map = affine_map<(d0) -> (d0)>
+func.func @no_fuse_multi_use_producer_with_duplicate_inputs(%arg0: tensor<2xi64>) -> tensor<2xi64> {
+  %0 = tensor.empty() : tensor<2xi64>
+  %1 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel"]}
+      ins(%arg0 : tensor<2xi64>) outs(%0 : tensor<2xi64>) {
+  ^bb0(%in: i64, %out: i64):
+    %c0_i64 = arith.constant 0 : i64
+    %neg = arith.subi %c0_i64, %in : i64
+    %abs = arith.maxsi %in, %neg : i64
+    linalg.yield %abs : i64
+  } -> tensor<2xi64>
+  %2 = tensor.empty() : tensor<2xi64>
+  // Consumer uses %1 twice as duplicate inputs. The producer %1 has two uses,
+  // so hasOneUse() should block fusion.
+  %3 = linalg.generic {indexing_maps = [#map, #map, #map], iterator_types = ["parallel"]}
+      ins(%1, %1 : tensor<2xi64>, tensor<2xi64>) outs(%2 : tensor<2xi64>) {
+  ^bb0(%in: i64, %in_0: i64, %out: i64):
+    %add = arith.addi %in, %in_0 : i64
+    linalg.yield %add : i64
+  } -> tensor<2xi64>
+  return %3 : tensor<2xi64>
+}
+
+// CHECK-LABEL: @no_fuse_multi_use_producer_with_duplicate_inputs
+//       CHECK:   %[[PRODUCER:.+]] = linalg.generic
+//       CHECK:     arith.maxsi
+//       CHECK:   linalg.generic
+//  CHECK-SAME:     ins(%[[PRODUCER]] : tensor<2xi64>)
+//       CHECK:     arith.addi %{{.*}}, %{{.*}} : i64
